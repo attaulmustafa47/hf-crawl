@@ -39,7 +39,7 @@ jobs:
           : > out/hf_models_raw.jsonl
 
           BASE="https://huggingface.co/api/models"
-          UA="COS-Frontier-GHA/5.1"
+          UA="COS-Frontier-GHA/6.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
@@ -79,7 +79,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          UA="COS-Frontier-GHA/5.1"
+          UA="COS-Frontier-GHA/6.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
@@ -138,21 +138,25 @@ jobs:
       - name: Mega ORG sweep (no-search), merge + final dedupe
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          # Split the huge org list across multiple env vars to avoid YAML/heredoc issues.
+          # === MASSIVE ORG LIST, split to keep YAML safe (space-separated) ===
           ORGS1: "mistralai meta-llama Qwen deepseek-ai EleutherAI tiiuae google microsoft allenai nvidia stabilityai bigscience databricks togethercomputer baichuan-inc 01-ai xverse openaccess-ai-collective mlx-community Salesforce tencent OpenAssistant mlc-ai HuggingFaceH4 HuggingFaceM4 laion uclanlp stanfordnlp princeton-nlp OpenGVLab IDEA-CCNL openbmb baidu TencentARC kakaobrain ai-forever bigcode codellama codefuse-ai TheBloke bartowski NousResearch mlabonne philschmid RWKV declare-lab cerebras mosaicml nomic-ai openlm-research openbuddy openrouter aws-neuron OLMo-LM stabilityai-stablelm cerebras-GPT databricks-dolly vllm-project yandex ai21 SalesforceAIResearch Snowflake-Labs HuggingFace Open-Orca OpenBioLM BioMistral MedARC medalpaca OpenAccess-AI oobabooga KoboldAI koboldai teknium migtissera jartine lmsys tloen ray-project lightning-AI"
           ORGS2: "onnx openvino intel-neural-compressor tensorrt deepspeed bitsandbytes timdettmers huggingface-projects facebookresearch FAIR LAION-AI sberbank-ai yandex-research bigcode-project CodeLlama MetaLLama ResearchHub Flan-T5 GoogleResearch google-research OpenNMT OpenNMT-py pytorch TsinghuaKE THUDM ZhipuAI BAAI BAAI-InternLM InternLM OpenBMB Minfo-NLP UER-py UER Huang-Ling Alibaba-NLP alibaba-damo-academy alibaba bytedance ByteDance ByteDanceAI iflytek baichuan-inc2 Baichuan2 ZeroNLP NUS NLP4SG CMU-MLC USC-ICT Berkeley-NLP HKUST-NLP nyu-mll VITA-Group KAIST-AI NAVER NAVER-AI-Lab SKT-AI DeepMind LLaVA llava-ml alpaca-lora WizardLM orca-mini tiiuae-research mistralai-community mlx-examples microsoft/Phi-3 microsoft/Phi-4 meta-llama/Llama-3 meta-llama/Llama-2 Qwen/Qwen2 google/gemma bigscience/bloom stabilityai/stablelm togethercomputer/RedPajama-INCITE EleutherAI/gpt-j-6b EleutherAI/gpt-neo-125m facebook/opt-1.3b"
-          ORGS3: "allenai OpenGVLab IDEA-CCNL COYO-SS HazyResearch echarlaix ybelkada patrickvonplaten NielsRogge sgugger stevhliu vmware intel mlcommons trl-lib TRL trl coqui-ai espnet ESPnet facebook fairseq openai anthropic cohere ai21 AI21Labs salesforce SalesforceAIResearch MIT MIT-HAN-LAB openflamingo OpenFlamingo open-llama Textualize Liger-Kernel RWKV RWKV-Runner nousresearch NousResearch alpindale Xwin-LM XVERSE deepseek-ai Qwen2 Qwen2.5 cerebras databricks snorkelai ORCA Dolphin Vicuna fastai fastai-community BaiduResearch Open-MMLab MMDet MMSegmentation MMPretrain OpenMMLab SkyworkAI airaria mlx-community mlx-examples mlx-foundation"
-          ORGS4: "OpenAccess-AI-collective OpenBioLM Open-Orca OpenAssistant OpenBMB OpenGVLab OpenNMT OpenNMT-py OpenFlamingo OpenMMLab OpenAI HuggingFaceH4 HuggingFaceM4 HuggingFace mlx-community mlx-examples mlc-ai vllm-project stabilityai-stablelm CodeLlama MetaLLama InternLM BAAI-InternLM Minfo-NLP UER-py"
+          ORGS3: "allenai OpenGVLab IDEA-CCNL COYO-SS HazyResearch echarlaix ybelkada patrickvonplaten NielsRogge sgugger stevhliu vmware intel mlcommons trl-lib TRL trl coqui-ai espnet ESPnet facebook fairseq openai anthropic cohere ai21 AI21Labs salesforce SalesforceAIResearch MIT MIT-HAN-LAB openflamingo OpenFlamingo open-llama Textualize Liger-Kernel RWKV RWKV-Runner nousresearch NousResearch alpindale Xwin-LM XVERSE deepseek-ai Qwen2 Qwen2.5 cerebras databricks snorkelai ORCA Dolphin Vicuna lmsys fastai fastai-community BaiduResearch Open-MMLab MMDet MMSegmentation MMPretrain OpenMMLab SkyworkAI airaria mlx-foundation"
+          ORGS4: "OpenAccess-AI-collective OpenBioLM Open-Orca OpenAssistant OpenBMB OpenGVLab OpenNMT OpenNMT-py OpenFlamingo OpenMMLab OpenAI HuggingFaceH4 HuggingFaceM4 HuggingFace mlc-ai vllm-project stabilityai-stablelm CodeLlama MetaLLama InternLM BAAI-InternLM Minfo-NLP UER-py"
+          ORGS5: "stabilityai-stablelm stabilityai openbmb bigcode-project thebloke TheBloke bertin-project cerebras-GPT cerebrasai TogetherAI togethercomputer RedPajama EleutherAI pythia fdc-bench MosaicML mosaicml Meta-Llama meta-llama meta FAIR-Research"
+          ORGS6: "bigscience-workshop bigscience bloom HuggingFaceDatasets datasets-labs transformers diffusers peft accelerate optimum optimum-intel optimum-nvidia optimum-graphcore optimum-neuron optimum-habana safetensors sentence-transformers Laion-AI LAION research-backup"
+          ORGS7: "openaccess-ai-collective openaccess-ai OpenAccess-AI-collective Open-LLMs open_llama open-llama alpacalora alpaca-lora WizardLM-team WizardLMX TiGAI TIGER-Lab TIGERLab TIGER-Lab-NUS UER-SG UER-py UER"
+          ORGS8: "mlx-community mlx-examples mlx-foundation mlx-experiments apple mlc-ai-project mlc-ai web-llm WebLLM vllm-project vllm-project-inference xformers bitsandbytes-kernel k2-fsa kaldifeat espnet-oss nemo-toolkit nvidia-nemo NVIDIA-AI IPEX-Intel intel-aisaac"
 
         shell: bash
         run: |
           set -euo pipefail
           BASE="https://huggingface.co/api/models"
-          UA="COS-Frontier-GHA/5.1"
+          UA="COS-Frontier-GHA/6.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
-          ORGS="${ORGS1} ${ORGS2} ${ORGS3} ${ORGS4}"
+          ORGS="${ORGS1} ${ORGS2} ${ORGS3} ${ORGS4} ${ORGS5} ${ORGS6} ${ORGS7} ${ORGS8}"
 
           mkdir -p tmp
           : > tmp/author_append.jsonl
