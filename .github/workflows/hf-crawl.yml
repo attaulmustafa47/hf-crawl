@@ -1,20 +1,23 @@
-name: HF Crawl (matrix+alpha+terms+orgs)
+name: HF Crawl (matrix+alpha2+terms+orgs)
 
 on:
   workflow_dispatch:
     inputs:
       max_per_tag:
         description: Cap per pipeline tag (rows) per job
-        default: "60000"
+        default: "70000"
       max_per_alpha:
-        description: Cap per alphabet search term (rows) per job
-        default: "30000"
+        description: Cap per ONE-char search term (rows) per job
+        default: "40000"
+      max_per_alpha2:
+        description: Cap per TWO-char search term (rows) per job
+        default: "25000"
       max_per_term:
         description: Cap per common-term search (rows) per job
-        default: "30000"
+        default: "40000"
       overall_cap_per_job:
         description: Safety cap per job (rows)
-        default: "220000"
+        default: "300000"
       tags:
         description: Comma-separated pipeline tags for tag sweep
         default: "text-generation,text2text-generation,question-answering,summarization,translation,conversational,token-classification,text-classification,zero-shot-classification,table-question-answering,sentence-similarity,feature-extraction,fill-mask,image-classification,object-detection,image-segmentation,depth-estimation,image-to-text,text-to-image,image-to-image,unconditional-image-generation,super-resolution,visual-question-answering,document-question-answering,image-feature-extraction,automatic-speech-recognition,text-to-speech,audio-to-audio,voice-activity-detection,audio-classification,speaker-diarization,keyword-spotting,tabular-classification,tabular-regression,reinforcement-learning,time-series-forecasting"
@@ -37,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install jq
+      - name: Install jq (Linux/Mac)
         if: startsWith(matrix.os,'ubuntu') || startsWith(matrix.os,'macos')
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -y && sudo apt-get install -y jq; fi
@@ -47,16 +50,16 @@ jobs:
         if: startsWith(matrix.os,'windows')
         run: choco install jq -y
 
-      - name: Crawl (tags + alphabet + common-terms) on ${{ matrix.base_alias }}
+      - name: Crawl (tags + 1-char + 2-char + common-terms) on ${{ matrix.base_alias }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           BASE: ${{ matrix.base }}
           TAGS: ${{ github.event.inputs.tags }}
           MAX_PER_TAG: ${{ github.event.inputs.max_per_tag }}
           MAX_PER_ALPHA: ${{ github.event.inputs.max_per_alpha }}
+          MAX_PER_ALPHA2: ${{ github.event.inputs.max_per_alpha2 }}
           MAX_PER_TERM: ${{ github.event.inputs.max_per_term }}
           OVERALL_CAP_PER_JOB: ${{ github.event.inputs.overall_cap_per_job }}
-          # Popular model substrings (broad coverage even if tag/alpha filters are throttled)
           COMMON_TERMS: "llama mistral qwen mixtral gemma yi phi gpt neo jurassic rwkv falcon opt llama2 llama-2 llama3 llama-3 qwen2 qwen2.5 baichuan deepseek xverse internlm glm chatglm vicuna wizard zephyr orca dolphin redpajama bloom dolly olmo olmoe alpaca open-llama tinyllama smol phi-3 phi-4 mistralai codellama codeqwen qwen2-math qwen2.5-math qwen2.5-coder qwen2-coder qwen-coder mistral-instruct mistral-nemo nemotron nemo nemo-guardrails yi-1.5 yi-chat yi-coder yi-vl llava mini-gpt4 minicpm cogagent polylm xlm roberta bert t5 flan-t5 m2m nllb mamba moa moa-ssm moondream medusa medusa2 xwin xwincoder xwinlm arctic plamo sft dpo orpo steerlm llama-guard llama-guard2 llama-guard-3 llama-guard-rail"
         shell: bash
         run: |
@@ -64,12 +67,12 @@ jobs:
           mkdir -p out
           : > out/raw.jsonl
 
-          UA="COS-Frontier-GHA/8.0"
+          UA="COS-Frontier-GHA/9.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
           fetch_loop() {
-            # $1=searchTerm $2=maxCap
+            # $1=searchTerm  $2=maxCap
             local term="$1"; local cap="$2"
             local cursor=""; local fetched=0
             while :; do
@@ -77,7 +80,8 @@ jobs:
               [ -n "$cursor" ] && url="${url}&cursor=$(printf "%s" "$cursor" | jq -sRr @uri)"
               headers=$(mktemp); body=$(mktemp)
               code=$(curl -sS -m 60 -D "$headers" -H "User-Agent: $UA" "${AUTH[@]}" "$url" -o "$body" -w '%{http_code}') || code=000
-              if [ "$code" != "200" ]; then echo "[warn] HTTP $code term='${term}'"; rm -f "$headers" "$body"; break; fi
+              if [ "$code" != "200" ]; then echo "[warn] HTTP $code term='${term}'"; rm -f "$headers" "$body"; break
+              fi
               cnt=$(jq 'length' < "$body" || echo 0)
               if [ "$cnt" -eq 0 ]; then rm -f "$headers" "$body"; break; fi
               jq -c '.[]' < "$body" >> out/raw.jsonl
@@ -87,7 +91,7 @@ jobs:
               [ "$fetched" -ge "$cap" ] && echo "[cap] hit for '${term}'" && break
               [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && echo "[cap] job cap hit" && break
               [ -z "$cursor" ] && break
-              sleep 0.06
+              sleep 0.05
             done
           }
 
@@ -101,15 +105,63 @@ jobs:
             [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
           done
 
-          # --- 2) ALPHABET SWEEP (single char) ---
-          ALPHA=(a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9)
-          for L in "${ALPHA[@]}"; do
-            echo "=== ALPHA: ${L} @ ${BASE} ==="
+          # --- 2) 1-CHAR SWEEP ---
+          ALPHA1=(a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9)
+          for L in "${ALPHA1[@]}"; do
+            echo "=== ALPHA1: ${L} @ ${BASE} ==="
             fetch_loop "${L}" "${MAX_PER_ALPHA}"
             [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
           done
 
-          # --- 3) COMMON-TERM SWEEP ---
+          # --- 3) 2-CHAR SWEEP (aa..zz, 00..99, a0..z9, 0a..9z) ---
+          LETTERS=(a b c d e f g h i j k l m n o p q r s t u v w x y z)
+          DIGITS=(0 1 2 3 4 5 6 7 8 9)
+
+          # aa..zz
+          for A in "${LETTERS[@]}"; do
+            for B in "${LETTERS[@]}"; do
+              term="${A}${B}"
+              echo "=== ALPHA2 LL: ${term} @ ${BASE} ==="
+              fetch_loop "${term}" "${MAX_PER_ALPHA2}"
+              [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+            done
+            [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+          done
+
+          # 00..99
+          for A in "${DIGITS[@]}"; do
+            for B in "${DIGITS[@]}"; do
+              term="${A}${B}"
+              echo "=== ALPHA2 DD: ${term} @ ${BASE} ==="
+              fetch_loop "${term}" "${MAX_PER_ALPHA2}"
+              [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+            done
+            [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+          done
+
+          # a0..z9
+          for A in "${LETTERS[@]}"; do
+            for B in "${DIGITS[@]}"; do
+              term="${A}${B}"
+              echo "=== ALPHA2 LD: ${term} @ ${BASE} ==="
+              fetch_loop "${term}" "${MAX_PER_ALPHA2}"
+              [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+            done
+            [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+          done
+
+          # 0a..9z
+          for A in "${DIGITS[@]}"; do
+            for B in "${LETTERS[@]}"; do
+              term="${A}${B}"
+              echo "=== ALPHA2 DL: ${term} @ ${BASE} ==="
+              fetch_loop "${term}" "${MAX_PER_ALPHA2}"
+              [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+            done
+            [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+          done
+
+          # --- 4) COMMON-TERM SWEEP ---
           read -ra TERMS <<< "${COMMON_TERMS}"
           for T in "${TERMS[@]}"; do
             echo "=== TERM: ${T} @ ${BASE} ==="
@@ -118,12 +170,7 @@ jobs:
           done
 
           # --- Per-job DEDUPE ---
-          jq -s '
-            map({mid: (.modelId//.id//""), row: .})
-            | map(select(.mid != "")) 
-            | unique_by(.mid)
-            | map(.row)
-          ' out/raw.jsonl > out/raw_dedup.json
+          jq -s 'map({mid: (.modelId//.id//""), row: .}) | map(select(.mid != "")) | unique_by(.mid) | map(.row)' out/raw.jsonl > out/raw_dedup.json
           jq -c '.[]' out/raw_dedup.json > out/raw_dedup.jsonl
           rm -f out/raw_dedup.json
           echo "[info] job rows (deduped): $(wc -l < out/raw_dedup.jsonl)"
@@ -138,7 +185,7 @@ jobs:
   merge:
     needs: [sweep]
     runs-on: ubuntu-latest
-    timeout-minutes: 220
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - name: Install jq
@@ -158,12 +205,7 @@ jobs:
           : > out/hf_models_raw.jsonl
           find chunks -type f -name '*.jsonl' -print0 | xargs -0 -I{} bash -c 'cat "{}" >> out/hf_models_raw.jsonl'
           echo "[info] merged lines: $(wc -l < out/hf_models_raw.jsonl)"
-          jq -s '
-            map({mid: (.modelId//.id//""), row: .})
-            | map(select(.mid != "")) 
-            | unique_by(.mid)
-            | map(.row)
-          ' out/hf_models_raw.jsonl > out/hf_models_raw_dedup.json
+          jq -s 'map({mid: (.modelId//.id//""), row: .}) | map(select(.mid != "")) | unique_by(.mid) | map(.row)' out/hf_models_raw.jsonl > out/hf_models_raw_dedup.json
           jq -c '.[]' out/hf_models_raw_dedup.json > out/hf_models_raw_dedup.jsonl
           rm -f out/hf_models_raw_dedup.json
           echo "[info] after chunk dedupe: $(wc -l < out/hf_models_raw_dedup.jsonl)"
@@ -182,10 +224,9 @@ jobs:
         run: |
           set -euo pipefail
           BASE="https://huggingface.co/api/models"
-          UA="COS-Frontier-GHA/8.0"
+          UA="COS-Frontier-GHA/9.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
-
           ORGS="${ORGS1} ${ORGS2} ${ORGS3} ${ORGS4} ${ORGS5} ${ORGS6} ${ORGS7} ${ORGS8}"
 
           mkdir -p tmp
@@ -200,12 +241,7 @@ jobs:
           done
 
           (cat out/hf_models_raw_dedup.jsonl tmp/author_append.jsonl) > tmp/_merge2.jsonl
-          jq -s '
-            map({mid: (.modelId//.id//""), row: .})
-            | map(select(.mid != "")) 
-            | unique_by(.mid)
-            | map(.row)
-          ' <(jq -c '.' tmp/_merge2.jsonl) > out/hf_models_raw_dedup_final.json
+          jq -s 'map({mid: (.modelId//.id//""), row: .}) | map(select(.mid != "")) | unique_by(.mid) | map(.row)' <(jq -c '.' tmp/_merge2.jsonl) > out/hf_models_raw_dedup_final.json
           jq -c '.[]' out/hf_models_raw_dedup_final.json > out/hf_models_raw_dedup_final.jsonl
           rm -f out/hf_models_raw_dedup_final.json tmp/_merge2.jsonl tmp/author_append.jsonl
           echo "[info] FINAL rows: $(wc -l < out/hf_models_raw_dedup_final.jsonl)"
@@ -214,17 +250,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "modelId,author,pipeline_tag,createdAt,lastModified,downloads,likes" > out/hf_models_dedup.csv
-          jq -r '
-            [
-              (.modelId // .id // ""),
-              (.author // ""),
-              (.pipeline_tag // ""),
-              (.createdAt // ""),
-              (.lastModified // ""),
-              (.downloads // 0),
-              (.likes // 0)
-            ] | @csv
-          ' out/hf_models_raw_dedup_final.jsonl >> out/hf_models_dedup.csv
+          jq -r '[ (.modelId // .id // ""), (.author // ""), (.pipeline_tag // ""), (.createdAt // ""), (.lastModified // ""), (.downloads // 0), (.likes // 0) ] | @csv' out/hf_models_raw_dedup_final.jsonl >> out/hf_models_dedup.csv
           echo "[info] CSV rows: $(($(wc -l < out/hf_models_dedup.csv)-1))"
 
       - name: Upload artifacts
