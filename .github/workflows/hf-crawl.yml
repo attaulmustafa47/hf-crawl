@@ -1,13 +1,12 @@
 name: HF Crawl (curl+jq)
 
 on:
-  workflow_dispatch:  # enables the "Run workflow" button
+  workflow_dispatch:
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,19 +18,10 @@ jobs:
 
       - name: Crawl Hugging Face via REST (search + cursors)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}            # (optional) add in Settings → Secrets
-          MAX_PER_TAG: "15000"                         # per-pipeline tag cap
-          OVERALL_CAP: "200000"                        # overall safety cap
-          TAGS: >-                                     
-            text-generation,text2text-generation,question-answering,summarization,translation,conversational,
-            token-classification,text-classification,zero-shot-classification,table-question-answering,
-            sentence-similarity,feature-extraction,fill-mask,image-classification,object-detection,
-            image-segmentation,depth-estimation,image-to-text,text-to-image,image-to-image,
-            unconditional-image-generation,super-resolution,visual-question-answering,
-            document-question-answering,image-feature-extraction,automatic-speech-recognition,
-            text-to-speech,audio-to-audio,voice-activity-detection,audio-classification,
-            speaker-diarization,keyword-spotting,tabular-classification,tabular-regression,
-            reinforcement-learning,time-series-forecasting
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}        # optional
+          MAX_PER_TAG: "15000"
+          OVERALL_CAP: "200000"
+          TAGS: "text-generation,text2text-generation,question-answering,summarization,translation,conversational,token-classification,text-classification,zero-shot-classification,table-question-answering,sentence-similarity,feature-extraction,fill-mask,image-classification,object-detection,image-segmentation,depth-estimation,image-to-text,text-to-image,image-to-image,unconditional-image-generation,super-resolution,visual-question-answering,document-question-answering,image-feature-extraction,automatic-speech-recognition,text-to-speech,audio-to-audio,voice-activity-detection,audio-classification,speaker-diarization,keyword-spotting,tabular-classification,tabular-regression,reinforcement-learning,time-series-forecasting"
         run: |
           set -euo pipefail
           mkdir -p out
@@ -91,7 +81,7 @@ jobs:
 
           echo "[info] DEDUP lines after search: $(wc -l < out/hf_models_raw_dedup.jsonl)"
 
-      - name: Org sweep fallback (no-search; always runs and appends)
+      - name: Org sweep fallback (no-search; appends and re-dedupes)
         run: |
           set -euo pipefail
           BASE="https://huggingface.co/api/models"
@@ -99,59 +89,9 @@ jobs:
           AUTH=()
           if [ -n "${{ secrets.HF_TOKEN }}" ]; then AUTH=(-H "Authorization: Bearer ${{ secrets.HF_TOKEN }}"); fi
 
-          ORGS=$(cat <<'ORG'
-mistralai
-meta-llama
-Qwen
-deepseek-ai
-EleutherAI
-tiiuae
-google
-microsoft
-allenai
-nvidia
-stabilityai
-bigscience
-databricks
-togethercomputer
-baichuan-inc
-01-ai
-xverse
-openaccess-ai-collective
-mlx-community
-Salesforce
-tencent
-OpenAssistant
-mlc-ai
-HuggingFaceH4
-HuggingFaceM4
-laion
-uclanlp
-stanfordnlp
-princeton-nlp
-OpenGVLab
-IDEA-CCNL
-openbmb
-baidu
-TencentARC
-kakaobrain
-ai-forever
-bigcode
-codellama
-codefuse-ai
-TheBloke
-bartowski
-NousResearch
-mlabonne
-philschmid
-RWKV
-declare-lab
-cerebras
-ORG
-)
+          ORGS="mistralai meta-llama Qwen deepseek-ai EleutherAI tiiuae google microsoft allenai nvidia stabilityai bigscience databricks togethercomputer baichuan-inc 01-ai xverse openaccess-ai-collective mlx-community Salesforce tencent OpenAssistant mlc-ai HuggingFaceH4 HuggingFaceM4 laion uclanlp stanfordnlp princeton-nlp OpenGVLab IDEA-CCNL openbmb baidu TencentARC kakaobrain ai-forever bigcode codellama codefuse-ai TheBloke bartowski NousResearch mlabonne philschmid RWKV declare-lab cerebras"
 
-          mkdir -p out
-          # If previous step produced nothing, ensure files exist
+          # If previous step produced nothing, ensure file exists
           touch out/hf_models_raw.jsonl
 
           for org in $ORGS; do
