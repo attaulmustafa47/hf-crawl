@@ -1,4 +1,4 @@
-name: HF Crawl (all-in-one: search + mirror + mega-org)
+name: HF Crawl (all-in-one)
 
 on:
   workflow_dispatch:
