@@ -1,4 +1,4 @@
-name: HF Crawl (matrix-max)
+name: HF Crawl (matrix+alpha+terms+orgs)
 
 on:
   workflow_dispatch:
@@ -9,9 +9,12 @@ on:
       max_per_alpha:
         description: Cap per alphabet search term (rows) per job
         default: "30000"
+      max_per_term:
+        description: Cap per common-term search (rows) per job
+        default: "30000"
       overall_cap_per_job:
         description: Safety cap per job (rows)
-        default: "150000"
+        default: "220000"
       tags:
         description: Comma-separated pipeline tags for tag sweep
         default: "text-generation,text2text-generation,question-answering,summarization,translation,conversational,token-classification,text-classification,zero-shot-classification,table-question-answering,sentence-similarity,feature-extraction,fill-mask,image-classification,object-detection,image-segmentation,depth-estimation,image-to-text,text-to-image,image-to-image,unconditional-image-generation,super-resolution,visual-question-answering,document-question-answering,image-feature-extraction,automatic-speech-recognition,text-to-speech,audio-to-audio,voice-activity-detection,audio-classification,speaker-diarization,keyword-spotting,tabular-classification,tabular-regression,reinforcement-learning,time-series-forecasting"
@@ -30,7 +33,7 @@ jobs:
           - base: "https://hf-mirror.com/api/models"
             base_alias: mirror
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 300
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
 
@@ -44,74 +47,73 @@ jobs:
         if: startsWith(matrix.os,'windows')
         run: choco install jq -y
 
-      - name: Crawl (tags + alphabet) on ${{ matrix.base_alias }}
+      - name: Crawl (tags + alphabet + common-terms) on ${{ matrix.base_alias }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           BASE: ${{ matrix.base }}
           TAGS: ${{ github.event.inputs.tags }}
           MAX_PER_TAG: ${{ github.event.inputs.max_per_tag }}
           MAX_PER_ALPHA: ${{ github.event.inputs.max_per_alpha }}
+          MAX_PER_TERM: ${{ github.event.inputs.max_per_term }}
           OVERALL_CAP_PER_JOB: ${{ github.event.inputs.overall_cap_per_job }}
+          # Popular model substrings (broad coverage even if tag/alpha filters are throttled)
+          COMMON_TERMS: "llama mistral qwen mixtral gemma yi phi gpt neo jurassic rwkv falcon opt llama2 llama-2 llama3 llama-3 qwen2 qwen2.5 baichuan deepseek xverse internlm glm chatglm vicuna wizard zephyr orca dolphin redpajama bloom dolly olmo olmoe alpaca open-llama tinyllama smol phi-3 phi-4 mistralai codellama codeqwen qwen2-math qwen2.5-math qwen2.5-coder qwen2-coder qwen-coder mistral-instruct mistral-nemo nemotron nemo nemo-guardrails yi-1.5 yi-chat yi-coder yi-vl llava mini-gpt4 minicpm cogagent polylm xlm roberta bert t5 flan-t5 m2m nllb mamba moa moa-ssm moondream medusa medusa2 xwin xwincoder xwinlm arctic plamo sft dpo orpo steerlm llama-guard llama-guard2 llama-guard-3 llama-guard-rail"
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
           : > out/raw.jsonl
 
-          UA="COS-Frontier-GHA/7.0"
+          UA="COS-Frontier-GHA/8.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
-          # --- 1) TAG SWEEP (pipeline_tag:...) ---
-          IFS=',' read -ra TAGS_ARR <<< "${TAGS}"
-          overall=0
-          for TAG in "${TAGS_ARR[@]}"; do
-            echo "=== TAG: ${TAG} @ ${BASE} ==="
-            cursor=""
-            fetched=0
+          fetch_loop() {
+            # $1=searchTerm $2=maxCap
+            local term="$1"; local cap="$2"
+            local cursor=""; local fetched=0
             while :; do
-              URL="${BASE}?limit=100&full=true&sort=downloads&direction=-1&search=$(printf "pipeline_tag:%s" "$TAG" | jq -sRr @uri)"
-              [ -n "$cursor" ] && URL="${URL}&cursor=$(printf "%s" "$cursor" | jq -sRr @uri)"
+              local url="${BASE}?limit=100&full=true&sort=downloads&direction=-1&search=$(printf "%s" "$term" | jq -sRr @uri)"
+              [ -n "$cursor" ] && url="${url}&cursor=$(printf "%s" "$cursor" | jq -sRr @uri)"
               headers=$(mktemp); body=$(mktemp)
-              code=$(curl -sS -m 60 -D "$headers" -H "User-Agent: $UA" "${AUTH[@]}" "$URL" -o "$body" -w '%{http_code}') || code=000
-              if [ "$code" != "200" ]; then echo "[warn] tag HTTP $code"; rm -f "$headers" "$body"; break; fi
+              code=$(curl -sS -m 60 -D "$headers" -H "User-Agent: $UA" "${AUTH[@]}" "$url" -o "$body" -w '%{http_code}') || code=000
+              if [ "$code" != "200" ]; then echo "[warn] HTTP $code term='${term}'"; rm -f "$headers" "$body"; break; fi
               cnt=$(jq 'length' < "$body" || echo 0)
               if [ "$cnt" -eq 0 ]; then rm -f "$headers" "$body"; break; fi
               jq -c '.[]' < "$body" >> out/raw.jsonl
               fetched=$((fetched + cnt)); overall=$((overall + cnt))
               cursor=$(awk -F': ' 'BEGIN{IGNORECASE=1} tolower($1)=="x-next-page-cursor"{gsub(/\r/,"",$2); print $2}' "$headers")
               rm -f "$headers" "$body"
-              [ "$fetched" -ge "$MAX_PER_TAG" ] && echo "[cap] tag cap hit" && break
-              [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && echo "[cap] job cap hit" && break
-              [ -z "$cursor" ] && break
-              sleep 0.08
-            done
-            [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
-          done
-
-          # --- 2) ALPHABET SWEEP (broad free-text search) ---
-          ALPHA=(a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9)
-          for L in "${ALPHA[@]}"; do
-            echo "=== ALPHA: ${L} @ ${BASE} ==="
-            cursor=""
-            fetched=0
-            while :; do
-              URL="${BASE}?limit=100&full=true&sort=downloads&direction=-1&search=$(printf "%s" "$L" | jq -sRr @uri)"
-              [ -n "$cursor" ] && URL="${URL}&cursor=$(printf "%s" "$cursor" | jq -sRr @uri)"
-              headers=$(mktemp); body=$(mktemp)
-              code=$(curl -sS -m 60 -D "$headers" -H "User-Agent: $UA" "${AUTH[@]}" "$URL" -o "$body" -w '%{http_code}') || code=000
-              if [ "$code" != "200" ]; then echo "[warn] alpha HTTP $code"; rm -f "$headers" "$body"; break; fi
-              cnt=$(jq 'length' < "$body" || echo 0)
-              if [ "$cnt" -eq 0 ]; then rm -f "$headers" "$body"; break; fi
-              jq -c '.[]' < "$body" >> out/raw.jsonl
-              fetched=$((fetched + cnt)); overall=$((overall + cnt))
-              cursor=$(awk -F': ' 'BEGIN{IGNORECASE=1} tolower($1)=="x-next-page-cursor"{gsub(/\r/,"",$2); print $2}' "$headers")
-              rm -f "$headers" "$body"
-              [ "$fetched" -ge "$MAX_PER_ALPHA" ] && echo "[cap] alpha cap hit" && break
+              [ "$fetched" -ge "$cap" ] && echo "[cap] hit for '${term}'" && break
               [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && echo "[cap] job cap hit" && break
               [ -z "$cursor" ] && break
               sleep 0.06
             done
+          }
+
+          overall=0
+
+          # --- 1) TAG SWEEP ---
+          IFS=',' read -ra TAGS_ARR <<< "${TAGS}"
+          for TAG in "${TAGS_ARR[@]}"; do
+            echo "=== TAG: ${TAG} @ ${BASE} ==="
+            fetch_loop "pipeline_tag:${TAG}" "${MAX_PER_TAG}"
+            [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+          done
+
+          # --- 2) ALPHABET SWEEP (single char) ---
+          ALPHA=(a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9)
+          for L in "${ALPHA[@]}"; do
+            echo "=== ALPHA: ${L} @ ${BASE} ==="
+            fetch_loop "${L}" "${MAX_PER_ALPHA}"
+            [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
+          done
+
+          # --- 3) COMMON-TERM SWEEP ---
+          read -ra TERMS <<< "${COMMON_TERMS}"
+          for T in "${TERMS[@]}"; do
+            echo "=== TERM: ${T} @ ${BASE} ==="
+            fetch_loop "${T}" "${MAX_PER_TERM}"
             [ "$overall" -ge "$OVERALL_CAP_PER_JOB" ] && break
           done
 
@@ -136,7 +138,7 @@ jobs:
   merge:
     needs: [sweep]
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 220
     steps:
       - uses: actions/checkout@v4
       - name: Install jq
@@ -180,7 +182,7 @@ jobs:
         run: |
           set -euo pipefail
           BASE="https://huggingface.co/api/models"
-          UA="COS-Frontier-GHA/7.0"
+          UA="COS-Frontier-GHA/8.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
