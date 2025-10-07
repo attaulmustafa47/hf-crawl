@@ -1,12 +1,22 @@
-name: HF Crawl (curl+jq)
+name: HF Crawl (curl+jq, mirror & org fallback)
 
 on:
   workflow_dispatch:
+    inputs:
+      max_per_tag:
+        description: "Cap per pipeline tag (rows)"
+        default: "30000"
+      overall_cap:
+        description: "Overall safety cap (rows)"
+        default: "400000"
+      tags:
+        description: "Comma-separated pipeline tags to sweep"
+        default: "text-generation,text2text-generation,question-answering,summarization,translation,conversational,token-classification,text-classification,zero-shot-classification,table-question-answering,sentence-similarity,feature-extraction,fill-mask,image-classification,object-detection,image-segmentation,depth-estimation,image-to-text,text-to-image,image-to-image,unconditional-image-generation,super-resolution,visual-question-answering,document-question-answering,image-feature-extraction,automatic-speech-recognition,text-to-speech,audio-to-audio,voice-activity-detection,audio-classification,speaker-diarization,keyword-spotting,tabular-classification,tabular-regression,reinforcement-learning,time-series-forecasting"
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 420
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -14,21 +24,21 @@ jobs:
       - name: Install jq
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq moreutils
 
-      - name: Crawl Hugging Face via REST (search + cursors)
+      - name: Sweep with search+cursors (main endpoint)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}        # optional
-          MAX_PER_TAG: "15000"
-          OVERALL_CAP: "200000"
-          TAGS: "text-generation,text2text-generation,question-answering,summarization,translation,conversational,token-classification,text-classification,zero-shot-classification,table-question-answering,sentence-similarity,feature-extraction,fill-mask,image-classification,object-detection,image-segmentation,depth-estimation,image-to-text,text-to-image,image-to-image,unconditional-image-generation,super-resolution,visual-question-answering,document-question-answering,image-feature-extraction,automatic-speech-recognition,text-to-speech,audio-to-audio,voice-activity-detection,audio-classification,speaker-diarization,keyword-spotting,tabular-classification,tabular-regression,reinforcement-learning,time-series-forecasting"
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MAX_PER_TAG: ${{ github.event.inputs.max_per_tag }}
+          OVERALL_CAP: ${{ github.event.inputs.overall_cap }}
+          TAGS: ${{ github.event.inputs.tags }}
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out tmp
           : > out/hf_models_raw.jsonl
 
           BASE="https://huggingface.co/api/models"
-          UA="COS-Frontier-GHA/1.1"
+          UA="COS-Frontier-GHA/2.0"
           AUTH=()
           if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
@@ -36,85 +46,138 @@ jobs:
           overall=0
 
           for TAG in "${TAGS_ARR[@]}"; do
-            echo "=== TAG: ${TAG} ==="
+            echo "=== TAG(main): ${TAG} ==="
             cursor=""
             fetched=0
             while :; do
               URL="${BASE}?limit=100&full=true&sort=downloads&direction=-1&search=$(printf "pipeline_tag:%s" "$TAG" | jq -sRr @uri)"
               [ -n "$cursor" ] && URL="${URL}&cursor=$(printf "%s" "$cursor" | jq -sRr @uri)"
-
               headers=$(mktemp); body=$(mktemp)
               code=$(curl -sS -m 60 -D "$headers" -H "User-Agent: $UA" "${AUTH[@]}" "$URL" -o "$body" -w '%{http_code}')
               if [ "$code" != "200" ]; then
-                echo "[warn] HTTP $code for $TAG"; rm -f "$headers" "$body"; break
+                echo "[warn] HTTP $code on main for $TAG"; rm -f "$headers" "$body"; break
               fi
-
-              count=$(jq 'length' < "$body")
-              if [ "$count" -eq 0 ]; then rm -f "$headers" "$body"; break; fi
-
+              cnt=$(jq 'length' < "$body" || echo 0)
+              if [ "$cnt" -eq 0 ]; then rm -f "$headers" "$body"; break; fi
               jq -c '.[]' < "$body" >> out/hf_models_raw.jsonl
-              fetched=$((fetched + count))
-              overall=$((overall + count))
-
+              fetched=$((fetched + cnt)); overall=$((overall + cnt))
               cursor=$(awk -F': ' 'BEGIN{IGNORECASE=1} tolower($1)=="x-next-page-cursor"{gsub(/\r/,"",$2); print $2}' "$headers")
               rm -f "$headers" "$body"
-
-              [ "$fetched" -ge "$MAX_PER_TAG" ] && echo "[cap] $TAG reached $MAX_PER_TAG" && break
-              [ "$overall" -ge "$OVERALL_CAP" ] && echo "[cap] overall reached $OVERALL_CAP" && break
+              [ "$fetched" -ge "$MAX_PER_TAG" ] && echo "[cap] $TAG hit $MAX_PER_TAG" && break
+              [ "$overall" -ge "$OVERALL_CAP" ] && echo "[cap] overall hit $OVERALL_CAP" && break
               [ -z "$cursor" ] && break
               sleep 0.1
             done
             [ "$overall" -ge "$OVERALL_CAP" ] && break
           done
 
-          echo "[info] RAW lines after search: $(wc -l < out/hf_models_raw.jsonl)"
+          echo "[info] RAW(main) lines: $(wc -l < out/hf_models_raw.jsonl)"
 
-          # First dedupe by modelId/id
-          jq -s '
-            map({mid: (.modelId//.id//""), row: .})
-            | map(select(.mid != "")) 
-            | unique_by(.mid)
-            | map(.row)
-          ' out/hf_models_raw.jsonl > out/hf_models_raw_dedup.json
-          jq -c '.[]' out/hf_models_raw_dedup.json > out/hf_models_raw_dedup.jsonl
-          rm -f out/hf_models_raw_dedup.json
+      - name: Retry on mirror if low count, then merge
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MAX_PER_TAG: ${{ github.event.inputs.max_per_tag }}
+          OVERALL_CAP: ${{ github.event.inputs.overall_cap }}
+          TAGS: ${{ github.event.inputs.tags }}
+        run: |
+          set -euo pipefail
+          UA="COS-Frontier-GHA/2.0"
+          AUTH=()
+          if [ -n "${HF_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${HF_TOKEN}"); fi
 
-          echo "[info] DEDUP lines after search: $(wc -l < out/hf_models_raw_dedup.jsonl)"
+          RAW_MAIN_LINES=$(wc -l < out/hf_models_raw.jsonl || echo 0)
+          if [ "$RAW_MAIN_LINES" -lt 5000 ]; then
+            echo "[info] main returned $RAW_MAIN_LINES (<5000). Trying mirror…"
+            BASE="https://hf-mirror.com/api/models"
+            IFS=',' read -ra TAGS_ARR <<< "${TAGS}"
+            overall=0
+            : > tmp/hf_models_raw_mirror.jsonl
+            for TAG in "${TAGS_ARR[@]}"; do
+              echo "=== TAG(mirror): ${TAG} ==="
+              cursor=""
+              fetched=0
+              while :; do
+                URL="${BASE}?limit=100&full=true&sort=downloads&direction=-1&search=$(printf "pipeline_tag:%s" "$TAG" | jq -sRr @uri)"
+                [ -n "$cursor" ] && URL="${URL}&cursor=$(printf "%s" "$cursor" | jq -sRr @uri)"
+                headers=$(mktemp); body=$(mktemp)
+                code=$(curl -sS -m 60 -D "$headers" -H "User-Agent: $UA" "${AUTH[@]}" "$URL" -o "$body" -w '%{http_code}')
+                if [ "$code" != "200" ]; then
+                  echo "[warn] HTTP $code on mirror for $TAG"; rm -f "$headers" "$body"; break
+                fi
+                cnt=$(jq 'length' < "$body" || echo 0)
+                if [ "$cnt" -eq 0 ]; then rm -f "$headers" "$body"; break; fi
+                jq -c '.[]' < "$body" >> tmp/hf_models_raw_mirror.jsonl
+                fetched=$((fetched + cnt)); overall=$((overall + cnt))
+                cursor=$(awk -F': ' 'BEGIN{IGNORECASE=1} tolower($1)=="x-next-page-cursor"{gsub(/\r/,"",$2); print $2}' "$headers")
+                rm -f "$headers" "$body"
+                [ "$fetched" -ge "$MAX_PER_TAG" ] && echo "[cap] $TAG hit $MAX_PER_TAG (mirror)" && break
+                [ "$overall" -ge "$OVERALL_CAP" ] && echo "[cap] overall hit $OVERALL_CAP (mirror)" && break
+                [ -z "$cursor" ] && break
+                sleep 0.1
+              done
+              [ "$overall" -ge "$OVERALL_CAP" ] && break
+            done
 
-      - name: Org sweep fallback (no-search; appends and re-dedupes)
+            # merge main + mirror, then overwrite raw
+            (cat out/hf_models_raw.jsonl tmp/hf_models_raw_mirror.jsonl) > tmp/merge.jsonl
+
+            jq -s '
+              map({mid: (.modelId//.id//""), row: .})
+              | map(select(.mid != "")) 
+              | unique_by(.mid)
+              | map(.row)
+            ' <(jq -c '.' tmp/merge.jsonl) > out/hf_models_raw_dedup.json
+            jq -c '.[]' out/hf_models_raw_dedup.json > out/hf_models_raw_dedup.jsonl
+            rm -f out/hf_models_raw_dedup.json
+          else
+            # dedupe only the main raw
+            jq -s '
+              map({mid: (.modelId//.id//""), row: .})
+              | map(select(.mid != "")) 
+              | unique_by(.mid)
+              | map(.row)
+            ' out/hf_models_raw.jsonl > out/hf_models_raw_dedup.json
+            jq -c '.[]' out/hf_models_raw_dedup.json > out/hf_models_raw_dedup.jsonl
+            rm -f out/hf_models_raw_dedup.json
+          fi
+
+          echo "[info] DEDUP lines after search/mirror: $(wc -l < out/hf_models_raw_dedup.jsonl)"
+
+      - name: Org sweep fallback (no-search; append + re-dedupe)
         run: |
           set -euo pipefail
           BASE="https://huggingface.co/api/models"
-          UA="COS-Frontier-GHA/1.1"
+          UA="COS-Frontier-GHA/2.0"
           AUTH=()
           if [ -n "${{ secrets.HF_TOKEN }}" ]; then AUTH=(-H "Authorization: Bearer ${{ secrets.HF_TOKEN }}"); fi
 
-          ORGS="mistralai meta-llama Qwen deepseek-ai EleutherAI tiiuae google microsoft allenai nvidia stabilityai bigscience databricks togethercomputer baichuan-inc 01-ai xverse openaccess-ai-collective mlx-community Salesforce tencent OpenAssistant mlc-ai HuggingFaceH4 HuggingFaceM4 laion uclanlp stanfordnlp princeton-nlp OpenGVLab IDEA-CCNL openbmb baidu TencentARC kakaobrain ai-forever bigcode codellama codefuse-ai TheBloke bartowski NousResearch mlabonne philschmid RWKV declare-lab cerebras"
+          # Large, curated org set (add more any time)
+          ORGS="mistralai meta-llama Qwen deepseek-ai EleutherAI tiiuae google microsoft allenai nvidia stabilityai bigscience databricks togethercomputer baichuan-inc 01-ai xverse openaccess-ai-collective mlx-community Salesforce tencent OpenAssistant mlc-ai HuggingFaceH4 HuggingFaceM4 laion uclanlp stanfordnlp princeton-nlp OpenGVLab IDEA-CCNL openbmb baidu TencentARC kakaobrain ai-forever bigcode codellama codefuse-ai TheBloke bartowski NousResearch mlabonne philschmid RWKV declare-lab cerebras mosaicml nomic-ai openlm-research openbuddy openrouter aws-neuron OLMo-LM stabilityai-stablelm"
 
-          # If previous step produced nothing, ensure file exists
-          touch out/hf_models_raw.jsonl
+          # ensure files exist
+          touch out/hf_models_raw.jsonl out/hf_models_raw_dedup.jsonl
 
+          : > tmp/author_append.jsonl
           for org in $ORGS; do
-            echo "[author] $org"
             url="${BASE}?limit=100&full=true&author=$(printf "%s" "$org" | jq -sRr @uri)"
             body=$(mktemp)
             code=$(curl -sS -m 60 -H "User-Agent: $UA" "${AUTH[@]}" "$url" -o "$body" -w '%{http_code}')
             if [ "$code" = "200" ]; then
-              jq -c '.[]' < "$body" >> out/hf_models_raw.jsonl || true
-            else
-              echo "[warn] HTTP $code for author=$org"
+              jq -c '.[]' < "$body" >> tmp/author_append.jsonl || true
             fi
             rm -f "$body"
             sleep 0.08
           done
 
-          # De-dupe again after org sweep
+          # merge search/mirror + authors
+          (cat out/hf_models_raw_dedup.jsonl tmp/author_append.jsonl) > tmp/merge2.jsonl
+
           jq -s '
             map({mid: (.modelId//.id//""), row: .})
             | map(select(.mid != "")) 
             | unique_by(.mid)
             | map(.row)
-          ' out/hf_models_raw.jsonl > out/hf_models_raw_dedup.json
+          ' <(jq -c '.' tmp/merge2.jsonl) > out/hf_models_raw_dedup.json
           jq -c '.[]' out/hf_models_raw_dedup.json > out/hf_models_raw_dedup.jsonl
           rm -f out/hf_models_raw_dedup.json
 
